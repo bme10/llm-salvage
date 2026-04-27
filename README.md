@@ -1,5 +1,9 @@
 # llm-salvage
 
+[![PyPI](https://img.shields.io/pypi/v/llm-salvage)](https://pypi.org/project/llm-salvage/)
+[![Python versions](https://img.shields.io/pypi/pyversions/llm-salvage)](https://pypi.org/project/llm-salvage/)
+[![License](https://img.shields.io/pypi/l/llm-salvage)](https://github.com/bme10/llm-salvage/blob/main/LICENSE)
+
 Salvage structured data from LLM responses that didn't follow instructions.
 
 ```bash
@@ -10,9 +14,10 @@ pip install llm-salvage
 
 You ask a local model for structured output. It mostly does what you said, but:
 
-- It wrapped the JSON in ` ```json ` fences when you said not to.
-- It used `"sentiment"` instead of `"verdict"`, or `Bullish` instead of `BULLISH`.
-- It misspelled a tag name - `[VERDCIT]` instead of `[VERDICT]`.
+- It wrapped the JSON in markdown code fences when you said not to.
+- It used a synonym for one of your field names - `sentiment` instead of `verdict`.
+- It returned `Bullish` when your schema expected `BULLISH`.
+- It misspelled a tag name - `[VERDCT]` instead of `[VERDICT]`.
 - It returned trailing commas, smart quotes, or nested objects where you wanted strings.
 - It wrote a thoughtful paragraph before the structured output you asked for.
 
