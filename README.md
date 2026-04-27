@@ -261,6 +261,7 @@ several common domains:
 - [`docs/schema-files.md`](./docs/schema-files.md) - YAML/JSON/TOML schema syntax
 - [`docs/telemetry.md`](./docs/telemetry.md) - interpreting JSONL telemetry
 - [`docs/adapters.md`](./docs/adapters.md) - Pydantic and json-repair adapters
+- [`docs/limitations.md`](./docs/limitations.md) - known v0.1.0 limitations and workarounds
 
 ## Status
 
