@@ -38,7 +38,7 @@ need to make sense of raw text output.
 
 ## Quick start
 
-```python
+````python
 from llm_salvage import ResponseParser, Schema, Field
 
 schema = Schema(fields={
@@ -47,7 +47,7 @@ schema = Schema(fields={
     "summary":    Field(min_length=20),
 })
 
-response = """
+response = '''
 ```json
 {
   "sentiment": "Positive",
@@ -55,7 +55,7 @@ response = """
   "summary": "The product launch exceeded expectations across all key metrics.",
 }
 ```
-"""
+'''
 
 result = ResponseParser(schema).parse(response)
 
@@ -65,7 +65,7 @@ if result.ok:
 else:
     for error in result.errors:
         print(error)
-```
+````
 
 The parser stripped the code fences, repaired the trailing comma, normalized
 `"Positive"` to match the schema's choices, and recorded each fix as a
