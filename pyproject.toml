@@ -1,0 +1,88 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "llm-salvage"
+version = "0.1.0"
+description = "Salvage structured data from LLM responses that didn't follow instructions."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+    { name = "bme10" },
+]
+keywords = [
+    "llm",
+    "parsing",
+    "structured-output",
+    "extraction",
+    "ollama",
+    "local-models",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+yaml = ["pyyaml>=6.0"]
+pydantic = ["pydantic>=2.0"]
+repair = ["json-repair>=0.30"]
+all = ["pyyaml>=6.0", "pydantic>=2.0", "json-repair>=0.30"]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pyyaml>=6.0",
+    "pydantic>=2.0",
+    "json-repair>=0.30",
+    "ruff>=0.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/bme10/llm-salvage"
+Repository = "https://github.com/bme10/llm-salvage"
+Issues = "https://github.com/bme10/llm-salvage/issues"
+Changelog = "https://github.com/bme10/llm-salvage/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["llm_salvage"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "llm_salvage/",
+    "tests/",
+    "examples/",
+    "docs/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",   # line length is handled by formatter
+    "E702",   # column-aligned semicolon pipeline in apply_structural_corrections is intentional
+    "SIM105", # try/except/pass is fine for hot paths; contextlib.suppress is slower
+]
