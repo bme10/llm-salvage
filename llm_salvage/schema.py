@@ -175,7 +175,24 @@ class Schema:
             raise FileNotFoundError(f"Schema file not found: {path}")
 
         suffix = path.suffix.lower()
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            # Most common cause: the file was saved with the system default
+            # encoding (cp1252 on Windows) rather than UTF-8. Re-raise with
+            # a clearer, actionable message.
+            raise UnicodeDecodeError(
+                exc.encoding,
+                exc.object,
+                exc.start,
+                exc.end,
+                (
+                    f"Schema file {str(path)!r} is not valid UTF-8 "
+                    f"(byte 0x{exc.object[exc.start]:02x} at position {exc.start}). "
+                    f"Re-save the file as UTF-8. Most editors offer this option "
+                    f"in their save dialog (look for 'Encoding' or 'Save with encoding')."
+                ),
+            ) from exc
 
         if suffix in (".yaml", ".yml"):
             data = _load_yaml(text)
@@ -226,7 +243,15 @@ class Schema:
 
 
 def _field_from_dict(d: dict[str, Any]) -> Field:
-    """Build a Field from a dict. Coerces 'type' from string to FieldType."""
+    """
+    Build a Field from a dict. Coerces 'type' from string to FieldType.
+
+    YAML 1.1 auto-converts bare ``yes``/``no``/``on``/``off``/``true``/``false``
+    to Python booleans. To allow these as choice values without schema authors
+    having to remember to quote them, we coerce ``choices`` items and the
+    ``default`` value to strings here. Schema authors writing JSON or TOML
+    don't hit this issue.
+    """
     kwargs: dict[str, Any] = {}
 
     if "type" in d:
@@ -234,15 +259,36 @@ def _field_from_dict(d: dict[str, Any]) -> Field:
     if "required" in d:
         kwargs["required"] = bool(d["required"])
     if "choices" in d:
-        kwargs["choices"] = list(d["choices"])
+        # Coerce each choice to a string. Handles bool from YAML auto-conversion
+        # (yes/no/true/false), int (e.g. status codes), and other non-string types
+        # that schema authors might supply.
+        kwargs["choices"] = [_choice_to_string(c) for c in d["choices"]]
     if "min_length" in d:
         kwargs["min_length"] = int(d["min_length"])
     if "max_length" in d:
         kwargs["max_length"] = int(d["max_length"])
     if "default" in d:
-        kwargs["default"] = d["default"]
+        # Coerce default similarly when the field looks choice-shaped, to keep
+        # the default consistent with the (now string-coerced) choices.
+        if "choices" in d and not isinstance(d["default"], (dict, list)):
+            kwargs["default"] = _choice_to_string(d["default"])
+        else:
+            kwargs["default"] = d["default"]
 
     return Field(**kwargs)
+
+
+def _choice_to_string(value: Any) -> str:
+    """
+    Convert a choice value to its string form, with YAML-bool aware mapping.
+
+    Python ``True`` / ``False`` become ``"yes"`` / ``"no"`` rather than
+    ``"True"`` / ``"False"``, since the most common reason to see a bool here
+    is YAML's auto-conversion of bare ``yes``/``no``.
+    """
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
 
 
 def _load_yaml(text: str) -> dict[str, Any]:

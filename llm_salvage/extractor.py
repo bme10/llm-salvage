@@ -97,20 +97,16 @@ def _extract_probability_weights(value: Any) -> dict[str, int] | None:
       - dict: ``{"option_a": 60, "option_b": 40}``
       - string: ``"option_a=60 option_b=40"``
       - string: ``"60/40"`` or ``"60:40"``
-      - scalar: treated as probability of the first labelled outcome with
-        the remainder going to a second outcome.
 
     Returns ``None`` if no recognizable probability data was found. Output
     is a plain dict of label → int; the validator's PROBABILITY type
     handles sum normalization.
-    """
-    # Scalar — produce a two-bucket distribution. The buckets aren't named;
-    # callers can interpret them. This case mostly exists to gracefully
-    # handle malformed responses that emit a single number.
-    if isinstance(value, (int, float)):
-        primary = int(value)
-        return {"primary": primary, "remainder": max(0, 100 - primary)}
 
+    Scalar values are not accepted — a probability distribution requires
+    at least two named or positional buckets. A bare number like ``50``
+    is ambiguous (50% of what?) and is treated as unparseable rather than
+    silently inflated into a two-bucket distribution with invented labels.
+    """
     if isinstance(value, dict):
         # Pass through dicts of label -> int directly.
         result: dict[str, int] = {}
@@ -156,6 +152,54 @@ def _extract_text_value(value: Any) -> str:
     return str(value).strip()
 
 
+def _find_probability_fields(
+    data:    dict,
+    key_map: dict[str, str],
+    schema:  Schema,
+    prefix:  str = "",
+) -> tuple[dict[str, Any], set[str]]:
+    """
+    Walk a parsed JSON tree looking for keys that map to probability-typed
+    schema fields. When found, extract the value (which may be a nested dict,
+    a string, or a number) without flattening it.
+
+    Returns:
+        - dict of canonical_field_name -> extracted weights
+        - set of dot-joined paths that should be excluded from later flattening
+          (so probability sub-keys don't leak into other fields)
+    """
+    found: dict[str, Any] = {}
+    excluded_paths: set[str] = set()
+
+    for k, v in data.items():
+        path = f"{prefix}.{k}" if prefix else k
+        canonical = key_map.get(k.lower())
+        if canonical:
+            field_def = schema.fields.get(canonical)
+            if field_def and field_def.type == FieldType.PROBABILITY and canonical not in found:
+                weights = _extract_probability_weights(v)
+                if weights:
+                    found[canonical] = weights
+                    # Mark every key under this path as off-limits to the
+                    # flattened scan, so e.g. "confidence.high" doesn't get
+                    # routed to a `high` schema field.
+                    excluded_paths.add(path)
+                    continue
+
+        # Recurse into nested dicts, but only when this key didn't already
+        # claim a probability field.
+        if isinstance(v, dict):
+            inner_found, inner_excluded = _find_probability_fields(
+                v, key_map, schema, prefix=path
+            )
+            for fk, fv in inner_found.items():
+                if fk not in found:
+                    found[fk] = fv
+            excluded_paths.update(inner_excluded)
+
+    return found, excluded_paths
+
+
 def extract_json(
     text: str,
     schema: Schema,
@@ -168,6 +212,10 @@ def extract_json(
     flattened so that ``{"thesis": {"summary": "..."}}`` matches a
     schema field named ``summary`` either via the leaf key or via an
     alias on the parent path.
+
+    Probability-typed fields are detected before flattening to preserve
+    the structure of nested dict values like
+    ``{"confidence": {"high": 70, "medium": 20, "low": 10}}``.
     """
     corrections: list[str] = []
 
@@ -183,16 +231,27 @@ def extract_json(
     if not isinstance(data, dict):
         return {}, corrections
 
-    # Flatten nested structure for scanning.
-    flat = _flatten_json(data)
-
     key_map = _build_key_map(schema)
     result: dict[str, Any] = {}
+
+    # First pass: find probability-typed fields anywhere in the tree and
+    # extract them without flattening. This must happen before the flat scan
+    # to prevent nested probability sub-keys (e.g. "confidence.high") from
+    # being routed to unrelated schema fields.
+    prob_results, excluded_paths = _find_probability_fields(data, key_map, schema)
+    result.update(prob_results)
+
+    # Second pass: flatten the rest of the tree and scan flat keys.
+    flat = _flatten_json(data)
 
     # Scan all keys (including nested) for known mappings. Also check the
     # parent path so nested cases like "thesis.summary" can match either
     # via "summary" (leaf) or via "thesis" (parent alias).
     for raw_key, value in flat.items():
+        # Skip anything under a path that was claimed by a probability field.
+        if any(raw_key == p or raw_key.startswith(p + ".") for p in excluded_paths):
+            continue
+
         parts  = raw_key.split(".")
         leaf   = parts[-1].lower()
         parent = parts[-2].lower() if len(parts) > 1 else ""
@@ -207,6 +266,10 @@ def extract_json(
 
         # Type-specific extraction.
         if field_def.type == FieldType.PROBABILITY:
+            # Probability fields were handled in the first pass; if we got
+            # here, _find_probability_fields didn't extract anything usable
+            # (e.g. the value was a scalar or string). Try again on the flat
+            # value as a fallback.
             weights = _extract_probability_weights(value)
             if weights:
                 result[canonical] = weights

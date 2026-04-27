@@ -1,133 +1,94 @@
 # Known limitations
 
-This document catalogs known limitations in v0.1.0 with their
-workarounds. Each is targeted for fix in v0.1.1 unless otherwise
-noted.
+This document catalogs known limitations with their workarounds. As
+of v0.1.1, the three significant v0.1.0 issues have been resolved.
+This page is retained for the historical record and to document
+remaining edge cases.
 
-## 1. Nested-dict probability fields in JSON
+## Resolved in v0.1.1
 
-**Symptom.** When a JSON response has a probability field as a nested
-object:
+The following were limitations in v0.1.0 and are fixed in v0.1.1.
+If you are using v0.1.0, the workarounds below still apply; upgrade
+to v0.1.1 for the fixes.
 
-```json
-{
-  "verdict": "yes",
-  "confidence": {"high": 70, "medium": 20, "low": 10}
-}
-```
+### Nested-dict probability fields in JSON (resolved)
 
-…and the schema declares `confidence` as
-`Field(type=FieldType.PROBABILITY)`, the extracted result is wrong.
-The parser flattens nested JSON before scanning for fields, so
-`confidence.high`, `confidence.medium`, `confidence.low` become
-individual flat keys. The leaf `high` matches an unrelated schema
-field (or no field), and the `confidence` field never gets
-populated correctly.
+In v0.1.0, a JSON response with a probability field as a nested
+object such as
+`{"confidence": {"high": 70, "medium": 20, "low": 10}}` was
+extracted incorrectly because the parser flattened nested dicts
+before type-aware extraction. The probability sub-keys leaked into
+unrelated schema fields, and the intended probability field was
+lost.
 
-**Cause.** `_flatten_json` runs before type-aware extraction. A fix
-would detect probability-typed fields prior to flattening and
-preserve their structure.
-
-**Workaround.** Encode probability as a string in the JSON instead of
-a nested dict:
+**v0.1.0 workaround:** encode probability as a string instead of a
+nested dict:
 
 ```json
-{
-  "verdict": "yes",
-  "confidence": "high=70 medium=20 low=10"
-}
+{ "confidence": "high=70 medium=20 low=10" }
 ```
 
-The parser's string-format probability extraction handles this
-correctly. Same applies to `key=value` and slash-separated formats
-(`70/20/10` for two- or three-way splits).
+**v0.1.1 fix:** probability fields are detected before flattening
+at any depth of nesting, and their dict values are preserved
+intact.
 
-For tagged-format responses, the issue doesn't arise — tagged
-content with a probability tag is parsed correctly.
+### YAML auto-conversion of `yes`/`no` to booleans (resolved)
 
-## 2. PyYAML auto-conversion of `yes`/`no` to booleans
+In v0.1.0, a YAML schema with bare `yes` or `no` in a `choices`
+list crashed during `Schema.from_file()` because PyYAML's
+`safe_load` follows YAML 1.1 and auto-converts these to Python
+booleans, which `Field.__post_init__` then rejected.
 
-**Symptom.** A YAML schema with bare `yes` or `no` in a `choices`
-list crashes during `Schema.from_file()`:
+**v0.1.0 workaround:** quote the values explicitly:
 
 ```yaml
-fields:
-  blocking:
-    choices: [yes, no]   # Crashes: AttributeError on bool
+choices: ["yes", "no"]
 ```
 
-**Cause.** PyYAML's `safe_load` follows YAML 1.1, which auto-converts
-the bare words `yes`, `no`, `true`, `false`, `on`, `off`, `y`, `n`
-to Python booleans. When these reach `Field.__post_init__`, calling
-`.upper()` on a bool raises `AttributeError`.
+**v0.1.1 fix:** booleans (and other non-string types) in
+`choices` lists are coerced to strings during deserialization.
+Bools become `"yes"` / `"no"` rather than `"True"` / `"False"`,
+matching the most common reason to encounter them.
 
-**Workaround.** Quote the values explicitly:
+Quoting the values is still a perfectly fine practice — it makes
+the YAML unambiguous to readers — and is harmless under v0.1.1.
+But it's no longer required.
 
-```yaml
-fields:
-  blocking:
-    choices: ["yes", "no"]
-    default: "no"
-```
+### Unclear error from `Schema.from_file()` on non-UTF-8 files (resolved)
 
-This applies to every place these words might appear: choices, defaults,
-even values inside `key_aliases` and `tag_aliases` if those are bare
-yes/no for some reason.
+In v0.1.0, loading a schema file saved with the system default
+encoding (cp1252 on Windows) raised a bare `UnicodeDecodeError`
+without much context.
 
-JSON and TOML schemas don't have this issue; only YAML.
+**v0.1.0 workaround:** re-save the schema file as UTF-8 in your
+editor.
 
-A v0.1.1 fix could coerce `choices` items to strings during
-`_field_from_dict` deserialization, with a debug-level log when
-coercion happens.
+**v0.1.1 fix:** `Schema.from_file()` catches `UnicodeDecodeError`
+and re-raises with a message that names the file path, the
+offending byte, and tells the user to re-save as UTF-8. The
+underlying requirement (UTF-8 only) hasn't changed.
 
-## 3. CHOICE field defaults not normalized in v0.1.0 alpha
+## Behavior changes in v0.1.1
 
-**Status: Fixed.** This was an issue in early v0.1.0 development but
-was fixed before release. Defaults for CHOICE fields are now
-normalized to the canonical (uppercase) form, matching what would
-happen if the value had been parsed.
+### Bare numeric probability values are now rejected
 
-Documented here for the historical record and so anyone reading
-older patches understands what was changed.
+In v0.1.0, a JSON response like `{"confidence": 50}` for a
+probability-typed field was extracted as
+`{"primary": 50, "remainder": 50}` — a two-bucket distribution with
+invented labels.
 
-## 4. UTF-8 strictness vs system-default-encoded files
+In v0.1.1, this case returns no extracted probability and the
+validator surfaces an `invalid_probability` error. Inventing data
+that wasn't in the response is worse than honestly reporting it as
+unparseable.
 
-**Symptom.** `Schema.from_file()` raises `UnicodeDecodeError` when
-loading a YAML/JSON/TOML file that contains non-ASCII characters
-(em dashes, smart quotes, accented letters) and was saved with the
-system default encoding rather than UTF-8.
+If you have prompts that legitimately produce single-number
+probabilities, encode them as strings (`"50"` works through the
+string-format path) or use a dict (`{"likely": 50, "unlikely": 50}`).
 
-**Cause.** `Schema.from_file()` reads with `encoding="utf-8"` (the
-correct default for new files in 2026), but Windows Notepad and
-some legacy editors save as cp1252 by default. The mismatch is
-detected at read time.
+## Current limitations (v0.1.1)
 
-**Workaround.** Re-save the schema file as UTF-8. Most modern
-editors have a "Save with encoding" or similar option:
-
-- **VS Code**: bottom-right encoding indicator → "Reopen with
-  encoding" or "Save with encoding" → UTF-8.
-- **Notepad** (Windows 10+): File → Save As → Encoding dropdown →
-  UTF-8.
-- **Sublime Text**: File → Save with Encoding → UTF-8.
-- **vim**: `:set fileencoding=utf-8` then `:w`.
-
-Once saved as UTF-8, the file loads correctly.
-
-A v0.1.1 fix would catch `UnicodeDecodeError` and re-raise with a
-clearer message that names the file path and suggests re-encoding.
-
-## What this list is not
-
-This document lists *known* limitations — issues we've seen,
-understood, and have plans to fix. It is not:
-
-- A complete list of edge cases the library doesn't handle.
-- A list of features the library doesn't have (see the README for
-  scope).
-- A bug tracker (see GitHub Issues for those).
-
-If you hit a parsing case that should work but doesn't, opening an
-issue with the response text and schema is the most useful thing you
-can do. Reproducible cases from real workloads are more valuable than
-synthetic test cases.
+None known at this time. If you hit a parsing case that should work
+but doesn't, opening an issue with the response text and schema is
+the most useful contribution — telemetry corpora from real workloads
+beat invented test cases.

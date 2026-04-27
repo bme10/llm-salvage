@@ -454,4 +454,162 @@ def test_choice_default_is_normalized() -> None:
     # matching what would happen if the value had been parsed.
     assert result.data["priority"] == "MEDIUM"
 
-    
+    """
+Tests added in v0.1.1 — append these to the bottom of tests/test_parser.py.
+
+Each test corresponds to a specific fix in v0.1.1.
+"""
+
+# ── v0.1.1: Nested-dict probability extraction ──────────────────────────────
+
+
+def test_nested_probability_dict_top_level() -> None:
+    """A probability field with a nested dict value at the JSON top level."""
+    schema = Schema(fields={
+        "verdict":    Field(choices=["yes", "no"]),
+        "summary":    Field(min_length=10),
+        "confidence": Field(type=FieldType.PROBABILITY, required=False),
+    })
+    parser = ResponseParser(schema)
+    result = parser.parse("""
+{
+  "verdict": "yes",
+  "summary": "A reasonably long summary text here.",
+  "confidence": {"high": 70, "medium": 20, "low": 10}
+}
+""")
+    assert result.ok
+    assert result.data["confidence"] == {"high": 70, "medium": 20, "low": 10}
+
+
+def test_nested_probability_dict_deeply_nested() -> None:
+    """A probability field nested several levels deep in JSON."""
+    schema = Schema(fields={
+        "verdict":    Field(choices=["yes", "no"]),
+        "summary":    Field(min_length=10),
+        "confidence": Field(type=FieldType.PROBABILITY, required=False),
+    })
+    parser = ResponseParser(schema)
+    result = parser.parse("""
+{
+  "verdict": "yes",
+  "summary": "A reasonably long summary text here.",
+  "analysis": {
+    "breakdown": {
+      "confidence": {"high": 60, "medium": 30, "low": 10}
+    }
+  }
+}
+""")
+    assert result.ok
+    assert result.data["confidence"] == {"high": 60, "medium": 30, "low": 10}
+
+
+def test_probability_subkey_does_not_leak_to_other_fields() -> None:
+    """Sub-keys of a probability dict shouldn't be routed to other schema fields."""
+    schema = Schema(fields={
+        # 'flagged' is both a top-level schema field AND a sub-key of the
+        # nested probability dict. The top-level value should win.
+        "flagged":    Field(choices=["yes", "no"]),
+        "summary":    Field(min_length=10),
+        "confidence": Field(type=FieldType.PROBABILITY, required=False),
+    })
+    parser = ResponseParser(schema)
+    result = parser.parse("""
+{
+  "flagged": "no",
+  "summary": "A reasonably long summary text here.",
+  "confidence": {"flagged": 30, "borderline": 60, "clean": 10}
+}
+""")
+    assert result.ok
+    assert result.data["flagged"] == "NO"
+    assert result.data["confidence"] == {"flagged": 30, "borderline": 60, "clean": 10}
+
+
+# ── v0.1.1: YAML auto-boolean coercion ──────────────────────────────────────
+
+
+def test_yaml_bare_yes_no_in_choices(tmp_path: Path) -> None:
+    """YAML schemas with bare yes/no in choices should not crash."""
+    pytest.importorskip("yaml")
+
+    yaml_content = """
+fields:
+  blocking:
+    choices: [yes, no]
+    required: false
+    default: no
+"""
+    schema_path = tmp_path / "schema.yaml"
+    schema_path.write_text(yaml_content, encoding="utf-8")
+
+    schema = Schema.from_file(schema_path)
+    # Choices are normalized to uppercase by Field.__post_init__.
+    assert schema.fields["blocking"].choices == ["YES", "NO"]
+    # Default was the bool False from YAML, coerced to the string "no".
+    assert schema.fields["blocking"].default == "no"
+
+
+def test_yaml_bare_booleans_in_choices(tmp_path: Path) -> None:
+    """true/false also auto-convert in YAML and should be handled."""
+    pytest.importorskip("yaml")
+
+    yaml_content = """
+fields:
+  active:
+    choices: [true, false]
+    default: true
+"""
+    schema_path = tmp_path / "schema.yaml"
+    schema_path.write_text(yaml_content, encoding="utf-8")
+
+    schema = Schema.from_file(schema_path)
+    # Bool True/False coerce to "yes"/"no" rather than "True"/"False".
+    assert schema.fields["active"].choices == ["YES", "NO"]
+    assert schema.fields["active"].default == "yes"
+
+
+# ── v0.1.1: Clearer error for non-UTF-8 schema files ────────────────────────
+
+
+def test_schema_from_file_clear_error_on_non_utf8(tmp_path: Path) -> None:
+    """Non-UTF-8 schema files produce a clear, actionable error."""
+    schema_path = tmp_path / "schema.yaml"
+    # 0x97 is the cp1252 encoding of the em dash; invalid UTF-8.
+    schema_path.write_bytes(
+        b"fields:\n  topic:\n    choices: [a, b]\n# em dash \x97 here\n"
+    )
+
+    with pytest.raises(UnicodeDecodeError) as exc_info:
+        Schema.from_file(schema_path)
+
+    # The clearer message names the file path and instructs the user.
+    msg = exc_info.value.reason
+    assert str(schema_path) in msg
+    assert "UTF-8" in msg
+    assert "Re-save" in msg
+
+
+# ── v0.1.1: Scalar probability values are rejected ──────────────────────────
+
+
+def test_scalar_probability_value_rejected() -> None:
+    """A bare number for a probability field is no longer extracted."""
+    schema = Schema(fields={
+        "verdict":    Field(choices=["yes", "no"]),
+        "summary":    Field(min_length=10),
+        "confidence": Field(type=FieldType.PROBABILITY, required=False),
+    })
+    parser = ResponseParser(schema)
+    result = parser.parse("""
+{
+  "verdict": "yes",
+  "summary": "A reasonably long summary text here.",
+  "confidence": 50
+}
+""")
+    # The optional probability field is simply absent — no invented buckets.
+    assert "confidence" not in result.data
+    # The verdict and summary parsed cleanly.
+    assert result.data["verdict"] == "YES"
