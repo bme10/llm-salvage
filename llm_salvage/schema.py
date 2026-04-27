@@ -187,7 +187,7 @@ class Schema:
                 exc.start,
                 exc.end,
                 (
-                    f"Schema file {str(path)!r} is not valid UTF-8 "
+                    f"Schema file {path} is not valid UTF-8 "
                     f"(byte 0x{exc.object[exc.start]:02x} at position {exc.start}). "
                     f"Re-save the file as UTF-8. Most editors offer this option "
                     f"in their save dialog (look for 'Encoding' or 'Save with encoding')."
