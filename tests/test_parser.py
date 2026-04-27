@@ -440,3 +440,18 @@ A response wrapped in fences so the stripping correction is invoked.
 
     summary = correction_summary(log_path)
     assert summary.get("stripped_code_fences", 0) >= 2
+
+def test_choice_default_is_normalized() -> None:
+    """Defaults for CHOICE fields should be normalized to canonical form."""
+    schema = Schema(fields={
+        "topic":    Field(choices=["bug", "feature"]),
+        "priority": Field(choices=["high", "medium", "low"], required=False, default="medium"),
+    })
+    parser = ResponseParser(schema)
+    result = parser.parse("[TOPIC] bug [/TOPIC]")
+    assert result.ok
+    # Default "medium" is normalized to canonical form "MEDIUM",
+    # matching what would happen if the value had been parsed.
+    assert result.data["priority"] == "MEDIUM"
+
+    

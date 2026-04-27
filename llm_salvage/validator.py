@@ -64,9 +64,22 @@ def validate(
                 ))
                 continue
             elif field_def.has_default:
-                normalized[field_name] = field_def.default
-                corrections.append(f"applied_default_{field_name}")
-                continue
+                    # Defaults for CHOICE fields go through the same normalization
+                    # path as parsed values, so result.data has consistent shape
+                    # regardless of whether a value was extracted or defaulted.
+                    if field_def.type == FieldType.CHOICE:
+                        normalized_default, _ = normalize_choice_value(
+                            str(field_def.default), field_def.choices
+                        )
+                        normalized[field_name] = (
+                            normalized_default.upper()
+                            if normalized_default.upper() in field_def.choices
+                            else field_def.default
+                        )
+                    else:
+                        normalized[field_name] = field_def.default
+                    corrections.append(f"applied_default_{field_name}")
+                    continue
             else:
                 # Optional, no default — drop from result rather than
                 # leave a None entry.
