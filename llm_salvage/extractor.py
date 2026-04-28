@@ -23,6 +23,14 @@ def extract_tagged(
     """
     Extract ``[TAG]...[/TAG]`` content into a dict.
 
+    Also handles the common local-model pattern where closing tags are
+    omitted and the next opening tag serves as an implicit closer::
+
+        [SENTIMENT] neutral [CONFIDENCE] medium [SUMMARY] one sentence
+
+    In this case the parser treats each ``[TAG]`` as ending at the next
+    ``[TAG]`` or at end-of-text.
+
     Args:
         text:              Response text.
         wrapper_tags:      Tag names whose contents are recursed into rather
@@ -39,6 +47,7 @@ def extract_tagged(
     wrapper_set = {t.upper() for t in (wrapper_tags or [])}
     prob_tag = probability_field.upper() if probability_field else None
 
+    # Primary pattern: properly closed [TAG]...[/TAG] pairs.
     pattern = r"\[([A-Z_]+)\](.*?)\[/\1\]"
     matches = re.findall(pattern, text, re.DOTALL)
 
@@ -56,6 +65,37 @@ def extract_tagged(
             result[probability_field] = weights if weights else content.strip()
         else:
             result[tag.lower()] = content.strip()
+
+    # Fallback: if no properly-closed tags were found, try extracting
+    # unclosed tags where each [TAG] runs until the next [TAG] or end
+    # of text. This handles the common local-model pattern:
+    #   [SENTIMENT] neutral [CONFIDENCE] medium [SUMMARY] one sentence
+    if not result:
+        unclosed_pattern = r"\[([A-Z_]+)\]\s*(.*?)(?=\[[A-Z_]+\]|$)"
+        unclosed_matches = re.findall(unclosed_pattern, text, re.DOTALL)
+
+        if len(unclosed_matches) >= 2:
+            # Only use the fallback when there are multiple tag-like
+            # patterns — a single [TAG] could be a false positive from
+            # prose containing bracketed words.
+            corrections.append("extracted_unclosed_tags")
+            for tag, content in unclosed_matches:
+                key = tag.upper()
+                content = content.strip()
+                if not content:
+                    continue
+                if key in wrapper_set:
+                    inner_result, _ = extract_tagged(
+                        content,
+                        wrapper_tags=wrapper_tags,
+                        probability_field=probability_field,
+                    )
+                    result.update(inner_result)
+                elif prob_tag is not None and key == prob_tag:
+                    weights = _extract_probability_weights(content)
+                    result[probability_field] = weights if weights else content
+                else:
+                    result[tag.lower()] = content
 
     return result, corrections
 
@@ -351,7 +391,127 @@ def extract_assignment(
     return result, corrections
 
 
-# ── Format detection ──────────────────────────────────────────────────────────
+# ── Markdown bullet-list extraction ──────────────────────────────────────────
+
+def extract_markdown(
+    text: str,
+    schema: Schema,
+) -> tuple[dict[str, Any], list[str]]:
+    """
+    Extract structured data from markdown bullet/bold-label format.
+
+    Handles the common LLM pattern of responding with markdown instead of
+    JSON or tagged output::
+
+        * **Category:** Headphones
+        * **Brand:** Sony
+        * **Price:** 349
+        * **Key Features:**
+            * Noise cancelling
+            * 30-hour battery life
+
+    Also handles dash bullets and non-bold labels::
+
+        - Category: Headphones
+        - Brand: Sony
+
+    And bold-only (no bullet) headers from reasoning models::
+
+        **Category:** Headphones
+        **Brand:** Sony
+
+    Multi-line values (sub-bullets under a key) are joined into a single
+    string, which satisfies ``min_length`` constraints on string fields.
+
+    Keys are matched against schema field names and aliases
+    case-insensitively. Spaces and underscores in keys are interchangeable
+    (``key features`` matches ``key_features``).
+    """
+    corrections: list[str] = []
+    result: dict[str, Any] = {}
+
+    key_map = _build_key_map(schema)
+
+    # Extend the key map to handle space-separated variants of underscore keys.
+    # e.g. "key features" -> "key_features" -> canonical
+    extended_key_map = dict(key_map)
+    for k, v in key_map.items():
+        space_variant = k.replace("_", " ")
+        if space_variant != k:
+            extended_key_map[space_variant] = v
+
+    # Primary line pattern: optional bullet, optional bold around key, colon.
+    # Captures:
+    #   * **Key:** value      (bold key, bullet)
+    #   - **Key:** value      (bold key, dash bullet)
+    #   **Key:** value        (bold key, no bullet)
+    #   * Key: value          (plain key, bullet)
+    line_pattern = re.compile(
+        r"^(?:[*\-]\s*)?\*{0,2}([^*\n:]{2,60}?)\*{0,2}\s*:\s*(.*?)$",
+        re.MULTILINE,
+    )
+
+    # Sub-item pattern: indented bullets that continue the previous key's value.
+    sub_pattern = re.compile(
+        r"^[ \t]+[*\-+]\s+(.+)$",
+        re.MULTILINE,
+    )
+
+    lines = text.splitlines()
+    i = 0
+    last_canonical: str | None = None
+    last_value_lines: list[str] = []
+
+    def flush_last() -> None:
+        """Store the accumulated value for the last seen key."""
+        if last_canonical and last_value_lines:
+            joined = "; ".join(v.strip() for v in last_value_lines if v.strip())
+            if joined and last_canonical not in result:
+                result[last_canonical] = joined
+
+    while i < len(lines):
+        line = lines[i]
+
+        m = line_pattern.match(line)
+        if m:
+            flush_last()
+            raw_key = m.group(1).strip().strip("*").strip().lower()
+            raw_val = m.group(2).strip().strip("*").strip()
+
+            canonical = extended_key_map.get(raw_key)
+            if canonical:
+                last_canonical = canonical
+                last_value_lines = [raw_val] if raw_val else []
+            else:
+                last_canonical = None
+                last_value_lines = []
+        elif last_canonical and sub_pattern.match(line):
+            # Sub-bullet continuing previous key's value.
+            sub_m = sub_pattern.match(line)
+            if sub_m:
+                last_value_lines.append(sub_m.group(1).strip())
+        elif last_canonical and line.strip() and not line_pattern.match(line):
+            # Continuation line (plain text after a key with no inline value).
+            last_value_lines.append(line.strip())
+
+        i += 1
+
+    flush_last()
+
+    # Store everything collected.
+    for canonical, joined_value in result.copy().items():
+        field_def = schema.fields.get(canonical)
+        if field_def is None:
+            del result[canonical]
+            continue
+        # Let the validator handle type coercion — store as string for now.
+        # The validator's INTEGER/FLOAT handlers accept string input.
+        result[canonical] = joined_value.strip()
+
+    if result:
+        corrections.append("markdown_format_used")
+
+    return result, corrections
 
 def detect_format(text: str) -> Formats:
     """
@@ -445,8 +605,13 @@ def extract(
         if result:
             return result, all_corrections
 
-    # Final fallback — assignment format.
+    # Final fallbacks — assignment then markdown.
     result, corrections = extract_assignment(text, schema)
+    all_corrections.extend(corrections)
+    if result:
+        return result, all_corrections
+
+    result, corrections = extract_markdown(text, schema)
     all_corrections.extend(corrections)
     if result:
         return result, all_corrections

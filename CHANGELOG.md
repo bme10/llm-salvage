@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-04-28
+
+### Fixed
+- Mixed-closer tag handling. Models that close only some tags (e.g. only
+  the last field has `[/TAG]`) now parse correctly. `close_unclosed_tags`
+  now inserts missing closers immediately before the next opening tag
+  rather than appending them all at the end, allowing the primary regex
+  to match each field independently.
+- Fully-unclosed tag responses (where no fields have closing tags) are
+  no longer disrupted by `close_unclosed_tags` — the corrector detects
+  the all-unclosed pattern and defers to the extractor's fallback.
+
+### Added
+- Markdown bullet-list extraction. Responses formatted as `* **Key:** value`
+  or `- **Key:** value` (common from llama3.1, gemma2, deepseek-r1 on
+  freeform extraction prompts) now extract correctly via a new
+  `extract_markdown` extractor. Sub-bullets are joined into a single
+  string. Logs `markdown_format_used` correction code.
+
+### Data
+- Validated against 72 real responses from 12 local models (llama3.1:8b,
+  qwen2.5:7b, gemma2:9b, mistral:7b, phi4:14b, deepseek-r1:8b,
+  deepseek-r1:14b, qwen2.5-coder:7b, llama3.2:3b, phi3:mini,
+  gemma4:e2b, gemma4:e4b). Parse success rate improved from 59/72 to
+  66/72 across the test set.
+
+
 ## [0.1.1] - 2026-04-27
 
 ### Fixed

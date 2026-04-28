@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-salvage"
-version = "0.1.1"
+version = "0.1.2"
 description = "Salvage structured data from LLM responses that didn't follow instructions."
 readme = "README.md"
 license = { file = "LICENSE" }

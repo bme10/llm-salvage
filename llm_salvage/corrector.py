@@ -96,18 +96,72 @@ def close_unclosed_tags(
     known_tags: list[str],
 ) -> tuple[str, list[str]]:
     """
-    If a known opening tag exists without a matching closing tag, append it.
+    If a known opening tag exists without a matching closing tag, insert it.
 
     Only acts on tags in ``known_tags`` to avoid false positives. The
     typical caller passes the schema's field names (uppercased).
+
+    Closing tags are inserted *immediately before the next opening tag*
+    rather than appended to the end of the document. This handles the
+    mixed-closer pattern common in compact models::
+
+        [VERDICT] foo
+        [SEVERITY] bar
+        [BLOCKING] yes [/BLOCKING]
+
+    where only the last tag has a closer. Inserting closers before each
+    subsequent tag lets the primary ``[TAG]...[/TAG]`` regex match each
+    field independently rather than treating the entire document as one
+    field's content.
+
+    When *no* tags in the response have closers, this corrector does
+    nothing — the response is using the fully-unclosed style and the
+    extractor's fallback handles it better.
     """
     corrections: list[str] = []
-    for tag in known_tags:
-        open_pattern  = rf"\[{tag}\]"
-        close_pattern = rf"\[/{tag}\]"
-        if re.search(open_pattern, text) and not re.search(close_pattern, text):
+
+    open_tags = [
+        tag for tag in known_tags
+        if re.search(rf"\[{tag}\]", text)
+    ]
+    closed_tags = [
+        tag for tag in known_tags
+        if re.search(rf"\[/{tag}\]", text)
+    ]
+
+    # If no tags have closers at all, leave the text alone — the
+    # extractor's unclosed-tag fallback will handle this style.
+    if open_tags and not closed_tags:
+        return text, corrections
+
+    # For each open tag that lacks a closer, insert the closer immediately
+    # before the next opening tag (or at the end if it's the last field).
+    for tag in open_tags:
+        if re.search(rf"\[/{tag}\]", text):
+            continue  # already has a closer
+
+        # Find where [TAG] appears, then look for the next [ANY_TAG] after it.
+        open_match = re.search(rf"\[{tag}\]", text)
+        if not open_match:
+            continue
+
+        # Build a pattern that matches any opening tag that comes AFTER
+        # the current tag's content starts.
+        search_from = open_match.end()
+        tail = text[search_from:]
+
+        # Look for the next known opening tag in the tail.
+        next_open = re.search(r"\[([A-Z_]+)\]", tail)
+        if next_open:
+            # Insert the closer just before the next opening tag.
+            insert_pos = search_from + next_open.start()
+            text = text[:insert_pos] + f"[/{tag}]\n" + text[insert_pos:]
+        else:
+            # This is the last field — append at the end.
             text += f"\n[/{tag}]"
-            corrections.append(f"closed_unclosed_{tag.lower()}")
+
+        corrections.append(f"closed_unclosed_{tag.lower()}")
+
     return text, corrections
 
 
@@ -225,15 +279,13 @@ def _try_json_repair_package(text: str) -> str | None:
     try:
         repaired = _repair(text)
         # Verify the result actually parses and isn't an empty stub.
-        # json-repair returns "" or "{}" for unrepairable input, which we
-        # don't want to silently accept as a successful repair.
         if not repaired or repaired in ("{}", "[]", '""'):
             return None
         json.loads(repaired)
         return repaired
     except Exception:  # noqa: BLE001 — defensive; we fall through to builtin
         return None
-    
+
 
 def _builtin_json_repair(text: str) -> tuple[str, list[str]]:
     """
