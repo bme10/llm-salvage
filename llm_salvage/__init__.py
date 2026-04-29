@@ -28,7 +28,7 @@ from .schema import Field, FieldType, Formats, Schema
 from .telemetry import correction_summary, model_profile, read_events
 from .validator import ValidationError
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "ResponseParser",

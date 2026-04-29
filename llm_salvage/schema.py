@@ -57,6 +57,14 @@ class Field:
                     exceeding this are truncated, not rejected.
         default:    Value used for optional fields that are missing from
                     the response. Ignored for required fields.
+        opaque:     For STRING type — when True, the field's value is treated
+                    as an opaque string and never scanned for nested tagged
+                    or assignment-format content during extraction. Use this
+                    for envelope-like fields whose contents may contain
+                    markup-like text (code blocks, prompt templates, escaped
+                    JSON) that should not be parsed as part of the parent
+                    schema. Only meaningful for JSON-format extraction;
+                    tagged-format extraction is structural and unaffected.
     """
 
     type:       FieldType = FieldType.STRING
@@ -65,6 +73,7 @@ class Field:
     min_length: int       = 0
     max_length: int       = 0
     default:    Any       = _UNSET
+    opaque:     bool      = False
 
     def __post_init__(self) -> None:
         if self.choices:
@@ -187,7 +196,7 @@ class Schema:
                 exc.start,
                 exc.end,
                 (
-                    f"Schema file {path} is not valid UTF-8 "
+                    f"Schema file {str(path)!r} is not valid UTF-8 "
                     f"(byte 0x{exc.object[exc.start]:02x} at position {exc.start}). "
                     f"Re-save the file as UTF-8. Most editors offer this option "
                     f"in their save dialog (look for 'Encoding' or 'Save with encoding')."
@@ -274,6 +283,8 @@ def _field_from_dict(d: dict[str, Any]) -> Field:
             kwargs["default"] = _choice_to_string(d["default"])
         else:
             kwargs["default"] = d["default"]
+    if "opaque" in d:
+        kwargs["opaque"] = bool(d["opaque"])
 
     return Field(**kwargs)
 

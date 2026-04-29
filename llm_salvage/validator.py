@@ -64,22 +64,22 @@ def validate(
                 ))
                 continue
             elif field_def.has_default:
-                    # Defaults for CHOICE fields go through the same normalization
-                    # path as parsed values, so result.data has consistent shape
-                    # regardless of whether a value was extracted or defaulted.
-                    if field_def.type == FieldType.CHOICE:
-                        normalized_default, _ = normalize_choice_value(
-                            str(field_def.default), field_def.choices
-                        )
-                        normalized[field_name] = (
-                            normalized_default.upper()
-                            if normalized_default.upper() in field_def.choices
-                            else field_def.default
-                        )
-                    else:
-                        normalized[field_name] = field_def.default
-                    corrections.append(f"applied_default_{field_name}")
-                    continue
+                # Defaults for CHOICE fields go through the same normalization
+                # path as parsed values, so result.data has consistent shape
+                # regardless of whether a value was extracted or defaulted.
+                if field_def.type == FieldType.CHOICE:
+                    normalized_default, _ = normalize_choice_value(
+                        str(field_def.default), field_def.choices
+                    )
+                    normalized[field_name] = (
+                        normalized_default.upper()
+                        if normalized_default.upper() in field_def.choices
+                        else field_def.default
+                    )
+                else:
+                    normalized[field_name] = field_def.default
+                corrections.append(f"applied_default_{field_name}")
+                continue
             else:
                 # Optional, no default — drop from result rather than
                 # leave a None entry.
@@ -168,18 +168,21 @@ def _validate_string(
     corrections: list[str] = []
 
     # Check for unfilled template variables — these are typically prompt
-    # placeholders that the model didn't fill in.
-    unfilled = re.findall(r"\{[a-z_]+\}", text)
-    if unfilled:
-        errors.append(ValidationError(
-            field=field_name,
-            code="unfilled_template",
-            message=(
-                f"Field contains unfilled template variables: {unfilled}. "
-                f"This usually means a prompt placeholder was emitted "
-                f"verbatim rather than substituted."
-            ),
-        ))
+    # placeholders that the model didn't fill in. Skipped on opaque fields
+    # because their contents may legitimately contain {placeholder}-like
+    # tokens (Python f-strings, code with format specs, etc.).
+    if not getattr(field_def, "opaque", False):
+        unfilled = re.findall(r"\{[a-z_]+\}", text)
+        if unfilled:
+            errors.append(ValidationError(
+                field=field_name,
+                code="unfilled_template",
+                message=(
+                    f"Field contains unfilled template variables: {unfilled}. "
+                    f"This usually means a prompt placeholder was emitted "
+                    f"verbatim rather than substituted."
+                ),
+            ))
 
     if field_def.min_length and len(text) < field_def.min_length:
         errors.append(ValidationError(

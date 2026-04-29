@@ -240,6 +240,59 @@ def _find_probability_fields(
     return found, excluded_paths
 
 
+def _find_opaque_fields(
+    data:    dict,
+    key_map: dict[str, str],
+    schema:  Schema,
+    prefix:  str = "",
+) -> tuple[dict[str, Any], set[str]]:
+    """
+    Find STRING fields with opaque=True anywhere in the tree.
+
+    For each match, store the entire raw value as a JSON string (so nested
+    structure is preserved) and add the path to the exclusion set so the
+    flat scan doesn't recurse into it.
+
+    Returns:
+        - dict of field_name -> JSON string of the field's value
+        - set of paths to exclude from subsequent flat scanning
+    """
+    found: dict[str, Any] = {}
+    excluded_paths: set[str] = set()
+
+    for k, v in data.items():
+        path = f"{prefix}.{k}" if prefix else k
+        canonical = key_map.get(k.lower())
+        if canonical:
+            field_def = schema.fields.get(canonical)
+            if (field_def
+                and field_def.type == FieldType.STRING
+                and field_def.opaque
+                and canonical not in found):
+                # Serialize nested structures back to JSON for storage;
+                # plain scalars get stringified directly.
+                if isinstance(v, (dict, list)):
+                    found[canonical] = json.dumps(v)
+                else:
+                    found[canonical] = str(v)
+                excluded_paths.add(path)
+                continue
+
+        # Recurse into nested dicts only if this key didn't claim an
+        # opaque field. Lists aren't recursed because list items don't
+        # have keys to match against the schema.
+        if isinstance(v, dict):
+            inner_found, inner_excluded = _find_opaque_fields(
+                v, key_map, schema, prefix=path
+            )
+            for fk, fv in inner_found.items():
+                if fk not in found:
+                    found[fk] = fv
+            excluded_paths.update(inner_excluded)
+
+    return found, excluded_paths
+
+
 def extract_json(
     text: str,
     schema: Schema,
@@ -280,6 +333,16 @@ def extract_json(
     # being routed to unrelated schema fields.
     prob_results, excluded_paths = _find_probability_fields(data, key_map, schema)
     result.update(prob_results)
+
+    # Find opaque-marked fields and capture their entire content as a JSON
+    # string. Their paths are excluded from the flat scan so nested keys
+    # within don't get matched to other schema fields. This is the fix for
+    # envelope-style schemas where one field contains arbitrary content
+    # (code blocks, prompt templates, escaped JSON) that shouldn't be
+    # parsed as part of the parent.
+    opaque_results, opaque_excluded = _find_opaque_fields(data, key_map, schema)
+    result.update(opaque_results)
+    excluded_paths.update(opaque_excluded)
 
     # Second pass: flatten the rest of the tree and scan flat keys.
     flat = _flatten_json(data)

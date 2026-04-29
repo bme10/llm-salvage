@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## v0.1.3 — opaque fields for envelope schemas
+
+One feature, one bug fix, both driven by real-world testing against an Agent Zero proxy logging 164+ live LLM interactions across varied agentic tasks (sentiment analysis, ticket classification, code execution, browser agent, memory recall, search synthesis).
+
+### Added
+
+**`Field.opaque` flag.** STRING fields can now opt out of nested-content scanning during JSON extraction:
+
+```python
+from llm_salvage import Field, FieldType, Schema
+
+schema = Schema(fields={
+    "tool_name": Field(type=FieldType.STRING, required=False),
+    "tool_args": Field(type=FieldType.STRING, required=False, opaque=True),
+})
+```
+
+When the parser encounters an opaque field with a nested dict or list value, it serializes the entire value to a JSON string and stops recursing into it. Sub-keys within the opaque field are not matched against other schema fields, and the validator's `unfilled_template` check is skipped (opaque content may legitimately contain `{placeholder}` tokens like Python f-strings).
+
+The flag is supported in schema files via `opaque: true` on field definitions.
+
+### Fixed
+
+**Pass-1 false positive on envelope schemas.** Previously, a STRING field whose value contained tagged-format content as a string literal (e.g., a `code` sub-field with `[SENTIMENT] ... [/SENTIMENT]` examples) would have those nested tags extracted and added to `result.data` as if they were declared schema fields. With `opaque=True`, the parser correctly treats the field's content as data, not as parseable structure.
+
+Discovered while logging Agent Zero responses where `tool_args.code` contained Python `print()` calls demonstrating output formats:
+
+```json
+{
+  "tool_name": "code_execution_tool",
+  "tool_args": {
+    "code": "print(f'[SENTIMENT] {sentiment} [/SENTIMENT]')"
+  }
+}
+```
+
+Without `opaque=True`, the extractor would return `result.data["sentiment"]` populated from inside the `code` string. With `opaque=True`, only the declared fields appear in the result.
+
+**Validator: `unfilled_template` skipped on opaque fields.** Previously, opaque content containing format-spec syntax like `f'{x}'` would falsely trigger an `unfilled_template` validation error. The check now respects the opaque flag.
+
+### Tests
+
+Five new tests covering the opaque field behavior:
+- Opaque fields skip nested tag extraction
+- Opaque fields skip unfilled_template validation
+- Nested dicts in opaque fields are serialized as JSON strings
+- Schema files support `opaque: true` round-trip
+- Default for `opaque` is `False` (backward-compatible)
+
+All 29 existing tests continue to pass — the opaque flag is opt-in and changes no default behavior.
+
+### Install
+
+```bash
+pip install --upgrade llm-salvage
+```
+
+Or pin to v0.1.3:
+
+```bash
+pip install llm-salvage==0.1.3
+```
+
+
 ## [0.1.2] - 2026-04-28
 
 ### Fixed

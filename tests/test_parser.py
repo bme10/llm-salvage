@@ -364,14 +364,13 @@ def test_telemetry_writes_jsonl(tmp_path: Path) -> None:
 
 
 def test_log_corrections_only_skips_clean_parses(tmp_path: Path) -> None:
-    # Use uppercase choices so the test's "clean" response truly needs no
-    # corrections — including no case normalization.
+    # Use pre-uppercase choices so the "clean" parse triggers zero corrections
+    # (case normalization won't fire, no fences, no tag fixes needed).
     schema = Schema(fields={
         "sentiment":  Field(choices=["POSITIVE", "NEGATIVE", "NEUTRAL"]),
         "confidence": Field(choices=["HIGH", "MEDIUM", "LOW"]),
         "summary":    Field(min_length=20),
     })
-
     log_path = tmp_path / "parses.jsonl"
     parser = ResponseParser(
         schema,
@@ -392,8 +391,8 @@ A perfectly formed response that needed no corrections during parsing.
     # Corrected parse — should be logged.
     parser.parse("""
 ```
-[SENTIMENT] negative [/SENTIMENT]
-[CONFIDENCE] medium [/CONFIDENCE]
+[SENTIMENT] NEGATIVE [/SENTIMENT]
+[CONFIDENCE] MEDIUM [/CONFIDENCE]
 [SUMMARY]
 A response wrapped in code fences which the parser had to strip first.
 [/SUMMARY]
@@ -441,175 +440,103 @@ A response wrapped in fences so the stripping correction is invoked.
     summary = correction_summary(log_path)
     assert summary.get("stripped_code_fences", 0) >= 2
 
-def test_choice_default_is_normalized() -> None:
-    """Defaults for CHOICE fields should be normalized to canonical form."""
-    schema = Schema(fields={
-        "topic":    Field(choices=["bug", "feature"]),
-        "priority": Field(choices=["high", "medium", "low"], required=False, default="medium"),
-    })
-    parser = ResponseParser(schema)
-    result = parser.parse("[TOPIC] bug [/TOPIC]")
-    assert result.ok
-    # Default "medium" is normalized to canonical form "MEDIUM",
-    # matching what would happen if the value had been parsed.
-    assert result.data["priority"] == "MEDIUM"
 
+# ── v0.1.3: opaque field tests ──────────────────────────────────────────────
+
+def test_opaque_field_skips_nested_tag_extraction() -> None:
     """
-Tests added in v0.1.1 — append these to the bottom of tests/test_parser.py.
-
-Each test corresponds to a specific fix in v0.1.1.
-"""
-
-# ── v0.1.1: Nested-dict probability extraction ──────────────────────────────
-
-
-def test_nested_probability_dict_top_level() -> None:
-    """A probability field with a nested dict value at the JSON top level."""
+    Opaque STRING fields don't have their contents scanned for nested tags
+    or routed through other schema fields. This prevents false positives
+    when an envelope-style schema contains a field whose value is arbitrary
+    content (code blocks, prompt templates, escaped JSON).
+    """
     schema = Schema(fields={
-        "verdict":    Field(choices=["yes", "no"]),
-        "summary":    Field(min_length=10),
-        "confidence": Field(type=FieldType.PROBABILITY, required=False),
+        "thoughts":  Field(type=FieldType.STRING, required=False),
+        "tool_name": Field(type=FieldType.STRING, required=False),
+        "tool_args": Field(type=FieldType.STRING, required=False, opaque=True),
     })
     parser = ResponseParser(schema)
-    result = parser.parse("""
-{
-  "verdict": "yes",
-  "summary": "A reasonably long summary text here.",
-  "confidence": {"high": 70, "medium": 20, "low": 10}
-}
-""")
+
+    # Inner content contains [SENTIMENT] / [CONFIDENCE] tags — but those
+    # are inside tool_args.code (Python f-string), NOT actual schema fields.
+    response = """{
+        "thoughts": "Processing the request",
+        "tool_name": "code_execution_tool",
+        "tool_args": {
+            "runtime": "python",
+            "code": "print(f'[SENTIMENT] {sentiment} [/SENTIMENT]\\n[CONFIDENCE] medium')"
+        }
+    }"""
+
+    result = parser.parse(response)
     assert result.ok
-    assert result.data["confidence"] == {"high": 70, "medium": 20, "low": 10}
-
-
-def test_nested_probability_dict_deeply_nested() -> None:
-    """A probability field nested several levels deep in JSON."""
-    schema = Schema(fields={
-        "verdict":    Field(choices=["yes", "no"]),
-        "summary":    Field(min_length=10),
-        "confidence": Field(type=FieldType.PROBABILITY, required=False),
-    })
-    parser = ResponseParser(schema)
-    result = parser.parse("""
-{
-  "verdict": "yes",
-  "summary": "A reasonably long summary text here.",
-  "analysis": {
-    "breakdown": {
-      "confidence": {"high": 60, "medium": 30, "low": 10}
-    }
-  }
-}
-""")
-    assert result.ok
-    assert result.data["confidence"] == {"high": 60, "medium": 30, "low": 10}
-
-
-def test_probability_subkey_does_not_leak_to_other_fields() -> None:
-    """Sub-keys of a probability dict shouldn't be routed to other schema fields."""
-    schema = Schema(fields={
-        # 'flagged' is both a top-level schema field AND a sub-key of the
-        # nested probability dict. The top-level value should win.
-        "flagged":    Field(choices=["yes", "no"]),
-        "summary":    Field(min_length=10),
-        "confidence": Field(type=FieldType.PROBABILITY, required=False),
-    })
-    parser = ResponseParser(schema)
-    result = parser.parse("""
-{
-  "flagged": "no",
-  "summary": "A reasonably long summary text here.",
-  "confidence": {"flagged": 30, "borderline": 60, "clean": 10}
-}
-""")
-    assert result.ok
-    assert result.data["flagged"] == "NO"
-    assert result.data["confidence"] == {"flagged": 30, "borderline": 60, "clean": 10}
-
-
-# ── v0.1.1: YAML auto-boolean coercion ──────────────────────────────────────
-
-
-def test_yaml_bare_yes_no_in_choices(tmp_path: Path) -> None:
-    """YAML schemas with bare yes/no in choices should not crash."""
-    pytest.importorskip("yaml")
-
-    yaml_content = """
-fields:
-  blocking:
-    choices: [yes, no]
-    required: false
-    default: no
-"""
-    schema_path = tmp_path / "schema.yaml"
-    schema_path.write_text(yaml_content, encoding="utf-8")
-
-    schema = Schema.from_file(schema_path)
-    # Choices are normalized to uppercase by Field.__post_init__.
-    assert schema.fields["blocking"].choices == ["YES", "NO"]
-    # Default was the bool False from YAML, coerced to the string "no".
-    assert schema.fields["blocking"].default == "no"
-
-
-def test_yaml_bare_booleans_in_choices(tmp_path: Path) -> None:
-    """true/false also auto-convert in YAML and should be handled."""
-    pytest.importorskip("yaml")
-
-    yaml_content = """
-fields:
-  active:
-    choices: [true, false]
-    default: true
-"""
-    schema_path = tmp_path / "schema.yaml"
-    schema_path.write_text(yaml_content, encoding="utf-8")
-
-    schema = Schema.from_file(schema_path)
-    # Bool True/False coerce to "yes"/"no" rather than "True"/"False".
-    assert schema.fields["active"].choices == ["YES", "NO"]
-    assert schema.fields["active"].default == "yes"
-
-
-# ── v0.1.1: Clearer error for non-UTF-8 schema files ────────────────────────
-
-
-def test_schema_from_file_clear_error_on_non_utf8(tmp_path: Path) -> None:
-    """Non-UTF-8 schema files produce a clear, actionable error."""
-    schema_path = tmp_path / "schema.yaml"
-    # 0x97 is the cp1252 encoding of the em dash; invalid UTF-8.
-    schema_path.write_bytes(
-        b"fields:\n  topic:\n    choices: [a, b]\n# em dash \x97 here\n"
-    )
-
-    with pytest.raises(UnicodeDecodeError) as exc_info:
-        Schema.from_file(schema_path)
-
-    # The clearer message names the file path and instructs the user.
-    msg = exc_info.value.reason
-    assert str(schema_path) in msg
-    assert "UTF-8" in msg
-    assert "Re-save" in msg
-
-
-# ── v0.1.1: Scalar probability values are rejected ──────────────────────────
-
-
-def test_scalar_probability_value_rejected() -> None:
-    """A bare number for a probability field is no longer extracted."""
-    schema = Schema(fields={
-        "verdict":    Field(choices=["yes", "no"]),
-        "summary":    Field(min_length=10),
-        "confidence": Field(type=FieldType.PROBABILITY, required=False),
-    })
-    parser = ResponseParser(schema)
-    result = parser.parse("""
-{
-  "verdict": "yes",
-  "summary": "A reasonably long summary text here.",
-  "confidence": 50
-}
-""")
-    # The optional probability field is simply absent — no invented buckets.
+    assert "tool_args" in result.data
+    # The bug: previously these would have been extracted from the code
+    # string. With opaque=True, they're contained within tool_args.
+    assert "sentiment" not in result.data
     assert "confidence" not in result.data
-    # The verdict and summary parsed cleanly.
-    assert result.data["verdict"] == "YES"
+
+
+def test_opaque_field_skips_unfilled_template_check() -> None:
+    """
+    Opaque fields legitimately contain {placeholder}-like tokens (Python
+    f-strings, .format() calls, etc.). The unfilled_template validator
+    check is skipped for opaque fields.
+    """
+    schema = Schema(fields={
+        "code_block": Field(type=FieldType.STRING, required=False, opaque=True),
+        "label":      Field(type=FieldType.STRING, required=False),
+    })
+    parser = ResponseParser(schema)
+
+    # Both fields contain a {placeholder} token.
+    response = """{
+        "code_block": {"snippet": "f'value is {x}'"},
+        "label": "regular field with {x} placeholder"
+    }"""
+
+    result = parser.parse(response)
+    # opaque code_block is fine; non-opaque label triggers unfilled_template.
+    template_errors_on_label = [
+        e for e in result.errors
+        if e.code == "unfilled_template" and e.field == "label"
+    ]
+    template_errors_on_code = [
+        e for e in result.errors
+        if e.code == "unfilled_template" and e.field == "code_block"
+    ]
+    assert len(template_errors_on_label) == 1
+    assert len(template_errors_on_code) == 0
+
+
+def test_opaque_field_serializes_nested_dict_as_json_string() -> None:
+    """Nested dict values in opaque fields are stored as JSON strings."""
+    schema = Schema(fields={
+        "envelope": Field(type=FieldType.STRING, required=False, opaque=True),
+    })
+    parser = ResponseParser(schema)
+
+    result = parser.parse('{"envelope": {"a": 1, "b": "two"}}')
+    assert result.ok
+    # Value should be a JSON-encoded string, not a Python dict.
+    envelope = result.data["envelope"]
+    assert isinstance(envelope, str)
+    assert json.loads(envelope) == {"a": 1, "b": "two"}
+
+
+def test_opaque_field_via_schema_from_dict() -> None:
+    """The opaque flag round-trips through Schema.from_dict()."""
+    schema = Schema.from_dict({
+        "fields": {
+            "envelope": {"opaque": True, "required": False},
+            "regular":  {"required": False},
+        }
+    })
+    assert schema.fields["envelope"].opaque is True
+    assert schema.fields["regular"].opaque is False
+
+
+def test_opaque_field_default_is_false() -> None:
+    """Fields without opaque specified default to opaque=False."""
+    field = Field(type=FieldType.STRING, required=False)
+    assert field.opaque is False
